@@ -75,6 +75,30 @@ const REQUIRED_ENV_VARS = [
   'OWNER_USER_ID'
 ] as const;
 
+const BOT_COMMANDS = [
+  { command: 'start', description: 'Show the welcome message and keyboard' },
+  { command: 'help', description: 'Explain how to configure the bot' },
+  { command: 'menu', description: 'Reopen the main keyboard' },
+  { command: 'status', description: 'Display current processing stats' },
+  { command: 'settings', description: 'Open the configuration menu' },
+  { command: 'subscribe', description: 'Learn how to add a new channel or group' },
+  { command: 'sources', description: 'List monitored channels and groups' },
+  { command: 'pending', description: 'Show drafts waiting for review' },
+  { command: 'users', description: 'List authorized users' },
+  { command: 'unsubscribe', description: 'Stop monitoring a source by id' }
+];
+
+const WELCOME_MESSAGE =
+  '🤖 *Telegram Wiki Bot*\n\n' +
+  'I monitor your selected channels and groups, analyze messages with AI, and automatically create blog posts.\n\n' +
+  '*Features:*\n' +
+  '• AI-powered message analysis\n' +
+  '• Automatic content vs conversation detection\n' +
+  '• Smart message grouping\n' +
+  '• Dual publishing (Notion + GitHub)\n' +
+  '• Manual review option\n\n' +
+  'Use the menu or slash commands to get started!';
+
 function validateEnv(): void {
   const missing = REQUIRED_ENV_VARS.filter((name) => !process.env[name]);
   if (missing.length > 0) {
@@ -270,6 +294,22 @@ async function isAuthorized(userId: number): Promise<boolean> {
   return result.rows.length > 0 && result.rows[0].is_authorized === true;
 }
 
+async function ensureAuthorizedForMessage(ctx: Context): Promise<boolean> {
+  const from = ctx.from;
+  if (!from) {
+    return false;
+  }
+
+  await upsertUser(from.id, from.username);
+
+  const authorized = await isAuthorized(from.id);
+  if (!authorized && (!ctx.chat || ctx.chat.type === 'private')) {
+    await ctx.reply('⛔ You are not authorized to use this bot. Contact the owner for access.');
+  }
+
+  return authorized;
+}
+
 async function getUserSettings(userId: number): Promise<UserSettings> {
   const result = await pool.query<UserSettings>(
     'SELECT * FROM user_settings WHERE user_id = $1',
@@ -459,6 +499,147 @@ function getSettingsMenu(settings: UserSettings) {
     [Markup.button.callback('🔗 Set GitHub Repo', 'set_github_repo')],
     [Markup.button.callback('« Back', 'back_to_main')]
   ]);
+}
+
+async function sendWelcomeMessage(ctx: Context): Promise<void> {
+  const quickCommands = BOT_COMMANDS.filter((command) => command.command !== 'start')
+    .map((command) => `/${command.command} – ${command.description}`)
+    .join('\n');
+
+  const message = `${WELCOME_MESSAGE}\n\n*Quick commands*\n${quickCommands}`;
+
+  await ctx.reply(message, {
+    parse_mode: 'Markdown',
+    reply_markup: getMainMenu().reply_markup
+  });
+}
+
+async function sendStatus(ctx: Context): Promise<void> {
+  const stats = await pool.query<{
+    active_sources: string;
+    pending_messages: string;
+    pending_posts: string;
+    published_posts: string;
+  }>(
+    `SELECT
+      (SELECT COUNT(*) FROM monitored_sources WHERE user_id = $1 AND is_active = true) as active_sources,
+      (SELECT COUNT(*) FROM pending_messages pm
+       JOIN monitored_sources ms ON pm.source_id = ms.id
+       WHERE ms.user_id = $1 AND pm.is_processed = false) as pending_messages,
+      (SELECT COUNT(*) FROM blog_posts WHERE user_id = $1 AND status = 'pending') as pending_posts,
+      (SELECT COUNT(*) FROM blog_posts WHERE user_id = $1 AND status = 'published') as published_posts`,
+    [ctx.from!.id]
+  );
+
+  const row = stats.rows[0];
+  const activeSources = Number(row?.active_sources ?? 0);
+  const pendingMessages = Number(row?.pending_messages ?? 0);
+  const pendingPosts = Number(row?.pending_posts ?? 0);
+  const publishedPosts = Number(row?.published_posts ?? 0);
+
+  await ctx.reply(
+    `📊 *Bot Status*\n\n` +
+      `✅ Active Sources: ${activeSources}\n` +
+      `📨 Pending Messages: ${pendingMessages}\n` +
+      `📝 Posts Awaiting Review: ${pendingPosts}\n` +
+      `✨ Published Posts: ${publishedPosts}\n\n` +
+      '🤖 Bot is running and monitoring your sources.',
+    { parse_mode: 'Markdown' }
+  );
+}
+
+async function sendSettingsMenu(ctx: Context): Promise<void> {
+  const settings = await getUserSettings(ctx.from!.id);
+
+  await ctx.reply('⚙️ *Bot Settings*\n\nConfigure how the bot processes and publishes content:', {
+    parse_mode: 'Markdown',
+    reply_markup: getSettingsMenu(settings).reply_markup
+  });
+}
+
+async function sendSubscribeInstructions(ctx: Context): Promise<void> {
+  await ctx.reply(
+    '📢 *Subscribe to Channel/Group*\n\n' +
+      'Forward me a message from the channel or group you want to monitor, or add me to the group and give me access to read messages.\n\n' +
+      'I will confirm once the source is added.',
+    { parse_mode: 'Markdown' }
+  );
+}
+
+async function sendSourcesList(ctx: Context): Promise<void> {
+  const sources = await pool.query<MonitoredSource>(
+    'SELECT * FROM monitored_sources WHERE user_id = $1 ORDER BY created_at DESC',
+    [ctx.from!.id]
+  );
+
+  if (sources.rows.length === 0) {
+    await ctx.reply('📭 No monitored sources yet. Use ➕ Subscribe or /subscribe to add some!');
+    return;
+  }
+
+  let messageText = '📋 *Monitored Sources*\n\n';
+
+  for (const source of sources.rows) {
+    const status = source.is_active ? '✅' : '❌';
+    messageText += `${status} *${source.chat_title ?? 'Unnamed chat'}*\n`;
+    messageText += `   Type: ${source.chat_type}\n`;
+    messageText += `   ID: \`${source.id}\`\n\n`;
+  }
+
+  messageText += 'Use /unsubscribe <id> to remove a source';
+
+  await ctx.reply(messageText, { parse_mode: 'Markdown' });
+}
+
+async function sendPendingPosts(ctx: Context): Promise<void> {
+  const posts = await pool.query<BlogPostRow>(
+    'SELECT * FROM blog_posts WHERE user_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 10',
+    [ctx.from!.id, 'pending']
+  );
+
+  if (posts.rows.length === 0) {
+    await ctx.reply('📭 No pending posts. All caught up!');
+    return;
+  }
+
+  for (const post of posts.rows) {
+    const keyboard = Markup.inlineKeyboard([
+      [Markup.button.callback('✅ Publish', `publish_${post.id}`), Markup.button.callback('❌ Reject', `reject_${post.id}`)],
+      [Markup.button.callback('✏️ Edit', `edit_${post.id}`)]
+    ]);
+
+    let snippet = post.content.slice(0, 500);
+    if (post.content.length > 500) {
+      snippet += '...';
+    }
+
+    await ctx.reply(`📝 *${post.title}*\n\n${snippet}`, {
+      parse_mode: 'Markdown',
+      reply_markup: keyboard.reply_markup
+    });
+  }
+}
+
+async function sendUserList(ctx: Context): Promise<void> {
+  const users = await pool.query<{ user_id: number; username: string | null; is_authorized: boolean }>(
+    'SELECT user_id, username, is_authorized FROM users ORDER BY created_at DESC'
+  );
+
+  let messageText = '👥 *User Management*\n\n';
+
+  for (const user of users.rows) {
+    const status = user.is_authorized ? '✅' : '❌';
+    messageText += `${status} @${user.username ?? 'unknown'} (\`${user.user_id}\`)\n`;
+  }
+
+  messageText += '\nUse /authorize <user_id> to grant access\n';
+  messageText += 'Use /revoke <user_id> to remove access';
+
+  await ctx.reply(messageText, { parse_mode: 'Markdown' });
+}
+
+async function sendMainMenu(ctx: Context, text = 'Main menu reopened.'): Promise<void> {
+  await ctx.reply(text, { reply_markup: getMainMenu().reply_markup });
 }
 
 async function upsertUser(userId: number, username: string | undefined): Promise<void> {
@@ -661,69 +842,23 @@ bot.start(async (ctx) => {
     return;
   }
 
-  await ctx.reply(
-    '🤖 *Telegram Wiki Bot*\n\n' +
-      'I monitor your selected channels and groups, analyze messages with AI, and automatically create blog posts.\n\n' +
-      '*Features:*\n' +
-      '• AI-powered message analysis\n' +
-      '• Automatic content vs conversation detection\n' +
-      '• Smart message grouping\n' +
-      '• Dual publishing (Notion + GitHub)\n' +
-      '• Manual review option\n\n' +
-      'Use the menu below to get started!',
-    { parse_mode: 'Markdown', reply_markup: getMainMenu().reply_markup }
-  );
+  await sendWelcomeMessage(ctx);
 });
 
 bot.hears('📊 Status', async (ctx) => {
-  if (!await isAuthorized(ctx.from!.id)) {
+  if (!await ensureAuthorizedForMessage(ctx)) {
     return;
   }
 
-  const stats = await pool.query<{
-    active_sources: string;
-    pending_messages: string;
-    pending_posts: string;
-    published_posts: string;
-  }>(
-    `SELECT
-      (SELECT COUNT(*) FROM monitored_sources WHERE user_id = $1 AND is_active = true) as active_sources,
-      (SELECT COUNT(*) FROM pending_messages pm
-       JOIN monitored_sources ms ON pm.source_id = ms.id
-       WHERE ms.user_id = $1 AND pm.is_processed = false) as pending_messages,
-      (SELECT COUNT(*) FROM blog_posts WHERE user_id = $1 AND status = 'pending') as pending_posts,
-      (SELECT COUNT(*) FROM blog_posts WHERE user_id = $1 AND status = 'published') as published_posts`,
-    [ctx.from!.id]
-  );
-
-  const row = stats.rows[0];
-  const activeSources = Number(row?.active_sources ?? 0);
-  const pendingMessages = Number(row?.pending_messages ?? 0);
-  const pendingPosts = Number(row?.pending_posts ?? 0);
-  const publishedPosts = Number(row?.published_posts ?? 0);
-
-  await ctx.reply(
-    `📊 *Bot Status*\n\n` +
-      `✅ Active Sources: ${activeSources}\n` +
-      `📨 Pending Messages: ${pendingMessages}\n` +
-      `📝 Posts Awaiting Review: ${pendingPosts}\n` +
-      `✨ Published Posts: ${publishedPosts}\n\n` +
-      '🤖 Bot is running and monitoring your sources.',
-    { parse_mode: 'Markdown' }
-  );
+  await sendStatus(ctx);
 });
 
 bot.hears('⚙️ Settings', async (ctx) => {
-  if (!await isAuthorized(ctx.from!.id)) {
+  if (!await ensureAuthorizedForMessage(ctx)) {
     return;
   }
 
-  const settings = await getUserSettings(ctx.from!.id);
-
-  await ctx.reply(
-    '⚙️ *Bot Settings*\n\nConfigure how the bot processes and publishes content:',
-    { parse_mode: 'Markdown', reply_markup: getSettingsMenu(settings).reply_markup }
-  );
+  await sendSettingsMenu(ctx);
 });
 
 bot.action('toggle_auto_publish', async (ctx) => {
@@ -780,107 +915,104 @@ bot.action('set_github_repo', async (ctx) => {
 bot.action('back_to_main', async (ctx) => {
   await ctx.answerCbQuery();
   await ctx.deleteMessage();
-  await ctx.reply('Main menu reopened.', { reply_markup: getMainMenu().reply_markup });
+  await sendMainMenu(ctx);
 });
 
+
 bot.hears('➕ Subscribe', async (ctx) => {
-  if (!await isAuthorized(ctx.from!.id)) {
+  if (!await ensureAuthorizedForMessage(ctx)) {
     return;
   }
 
-  await ctx.reply(
-    '📢 *Subscribe to Channel/Group*\n\n' +
-      'Forward me a message from the channel or group you want to monitor, or add me to the group and give me access to read messages.\n\n' +
-      'I will confirm once the source is added.',
-    { parse_mode: 'Markdown' }
-  );
+  await sendSubscribeInstructions(ctx);
 });
 
 bot.hears('📋 List Sources', async (ctx) => {
-  if (!await isAuthorized(ctx.from!.id)) {
+  if (!await ensureAuthorizedForMessage(ctx)) {
     return;
   }
 
-  const sources = await pool.query<MonitoredSource>(
-    'SELECT * FROM monitored_sources WHERE user_id = $1 ORDER BY created_at DESC',
-    [ctx.from!.id]
-  );
-
-  if (sources.rows.length === 0) {
-    await ctx.reply('📭 No monitored sources yet. Use ➕ Subscribe to add some!');
-    return;
-  }
-
-  let messageText = '📋 *Monitored Sources*\n\n';
-
-  for (const source of sources.rows) {
-    const status = source.is_active ? '✅' : '❌';
-    messageText += `${status} *${source.chat_title ?? 'Unnamed chat'}*\n`;
-    messageText += `   Type: ${source.chat_type}\n`;
-    messageText += `   ID: \`${source.id}\`\n\n`;
-  }
-
-  messageText += 'Use /unsubscribe <id> to remove a source';
-
-  await ctx.reply(messageText, { parse_mode: 'Markdown' });
+  await sendSourcesList(ctx);
 });
 
 bot.hears('📝 Pending Posts', async (ctx) => {
-  if (!await isAuthorized(ctx.from!.id)) {
+  if (!await ensureAuthorizedForMessage(ctx)) {
     return;
   }
 
-  const posts = await pool.query<BlogPostRow>(
-    'SELECT * FROM blog_posts WHERE user_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT 10',
-    [ctx.from!.id, 'pending']
-  );
-
-  if (posts.rows.length === 0) {
-    await ctx.reply('📭 No pending posts. All caught up!');
-    return;
-  }
-
-  for (const post of posts.rows) {
-    const keyboard = Markup.inlineKeyboard([
-      [
-        Markup.button.callback('✅ Publish', `publish_${post.id}`),
-        Markup.button.callback('❌ Reject', `reject_${post.id}`)
-      ],
-      [Markup.button.callback('✏️ Edit', `edit_${post.id}`)]
-    ]);
-
-    let snippet = post.content.slice(0, 500);
-    if (post.content.length > 500) {
-      snippet += '...';
-    }
-
-    await ctx.reply(`📝 *${post.title}*\n\n${snippet}`, {
-      parse_mode: 'Markdown',
-      reply_markup: keyboard.reply_markup
-    });
-  }
+  await sendPendingPosts(ctx);
 });
 
 bot.hears('👥 Manage Users', async (ctx) => {
-  if (!await isAuthorized(ctx.from!.id)) {
+  if (!await ensureAuthorizedForMessage(ctx)) {
     return;
   }
 
-  const users = await pool.query<{ user_id: number; username: string | null; is_authorized: boolean }>(
-    'SELECT user_id, username, is_authorized FROM users ORDER BY created_at DESC'
-  );
+  await sendUserList(ctx);
+});
 
-  let messageText = '👥 *User Management*\n\n';
-
-  for (const user of users.rows) {
-    const status = user.is_authorized ? '✅' : '❌';
-    messageText += `${status} @${user.username ?? 'unknown'} (\`${user.user_id}\`)\n`;
+bot.command('help', async (ctx) => {
+  if (!await ensureAuthorizedForMessage(ctx)) {
+    return;
   }
 
-  messageText += '\nUse /authorize <user_id> to grant access\n';
-  messageText += 'Use /revoke <user_id> to remove access';
+  await sendWelcomeMessage(ctx);
+});
 
-  await ctx.reply(messageText, { parse_mode: 'Markdown' });
+bot.command('menu', async (ctx) => {
+  if (!await ensureAuthorizedForMessage(ctx)) {
+    return;
+  }
+
+  await sendMainMenu(ctx);
+});
+
+bot.command('status', async (ctx) => {
+  if (!await ensureAuthorizedForMessage(ctx)) {
+    return;
+  }
+
+  await sendStatus(ctx);
+});
+
+bot.command('settings', async (ctx) => {
+  if (!await ensureAuthorizedForMessage(ctx)) {
+    return;
+  }
+
+  await sendSettingsMenu(ctx);
+});
+
+bot.command('subscribe', async (ctx) => {
+  if (!await ensureAuthorizedForMessage(ctx)) {
+    return;
+  }
+
+  await sendSubscribeInstructions(ctx);
+});
+
+bot.command('sources', async (ctx) => {
+  if (!await ensureAuthorizedForMessage(ctx)) {
+    return;
+  }
+
+  await sendSourcesList(ctx);
+});
+
+bot.command('pending', async (ctx) => {
+  if (!await ensureAuthorizedForMessage(ctx)) {
+    return;
+  }
+
+  await sendPendingPosts(ctx);
+});
+
+bot.command('users', async (ctx) => {
+  if (!await ensureAuthorizedForMessage(ctx)) {
+    return;
+  }
+
+  await sendUserList(ctx);
 });
 
 bot.command('authorize', async (ctx) => {
@@ -920,7 +1052,7 @@ bot.command('revoke', async (ctx) => {
 });
 
 bot.command('unsubscribe', async (ctx) => {
-  if (!await isAuthorized(ctx.from!.id)) {
+  if (!await ensureAuthorizedForMessage(ctx)) {
     return;
   }
 
@@ -1123,6 +1255,8 @@ async function main(): Promise<void> {
   validateEnv();
   await initDatabase();
   await bot.launch();
+  await bot.telegram.setMyCommands(BOT_COMMANDS);
+  console.log('✅ Telegram commands registered');
   console.log('✅ Bot started successfully');
 
   processingInterval = setInterval(() => {
