@@ -1,0 +1,42 @@
+{
+  "name": "claude-deployment-agent",
+  "version": "1.0.0",
+  "description": "MCP server that gives Claude autonomous deployment capabilities",
+  "type": "module",
+  "main": "build/index.js",
+  "bin": {
+    "claude-deployment-agent": "./build/index.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "watch": "tsc --watch",
+    "prepare": "npm run build",
+    "test": "echo \"Add tests here\""
+  },
+  "keywords": [
+    "mcp",
+    "claude",
+    "deployment",
+    "automation",
+    "ci-cd",
+    "fly-io",
+    "github"
+  ],
+  "author": "Your Name",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "axios": "^1.7.7"
+  },
+  "devDependencies": {
+    "@types/node": "^22.9.0",
+    "typescript": "^5.6.3"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/yourusername/claude-deployment-agent.git"
+  }
+}
