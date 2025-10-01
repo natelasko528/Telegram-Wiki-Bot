@@ -85,6 +85,53 @@ Once you authorize yourself with the bot, you can control it entirely from Teleg
 
 The bot manages users, settings, monitored sources, pending messages, and generated blog posts inside PostgreSQL. Tables are created automatically at startup if they do not already exist.
 
+## Deploying to Fly.io
+
+The repository ships with a production-ready `Dockerfile` and `fly.toml` so you can deploy directly to [Fly.io](https://fly.io/) using their free tier.
+
+1. **Install the Fly CLI**
+   ```bash
+   curl -L https://fly.io/install.sh | sh
+   # or visit https://fly.io/docs/hands-on/install-flyctl
+   ```
+
+2. **Log in and create the app**
+   ```bash
+   fly auth login
+   fly apps create telegram-wiki-bot
+   ```
+
+3. **Provision PostgreSQL (optional but recommended)**
+   ```bash
+   fly postgres create --name telegram-wiki-bot-db
+   fly postgres attach --postgres-app telegram-wiki-bot-db telegram-wiki-bot
+   ```
+   Record the generated `DATABASE_URL` secret printed by Fly.
+
+4. **Configure secrets**
+   ```bash
+   fly secrets set \
+     TELEGRAM_BOT_TOKEN="your_bot_token" \
+     OWNER_USER_ID="123456789" \
+     GOOGLE_AI_API_KEY="your_gemini_key" \
+     DATABASE_URL="postgres://..." \
+     NOTION_API_KEY="optional_notion_key" \
+     GITHUB_TOKEN="optional_github_token"
+   ```
+
+5. **Deploy the bot**
+   ```bash
+   fly deploy
+   ```
+
+6. **Verify health**
+   ```bash
+   fly open /health
+   fly logs
+   ```
+
+The Fly runtime will automatically expose the `/health` endpoint (listening on port `8080`) so you can plug it into external monitors. If you need to rotate credentials later, update them with `fly secrets set` and redeploy.
+
 ## Deployment Notes
 
 - The `/health` endpoint exposes a JSON status payload useful for uptime checks.
