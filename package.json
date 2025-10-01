@@ -4,11 +4,11 @@
   "description": "AI-powered Telegram bot that creates wiki posts from monitored channels",
   "main": "dist/index.js",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc --project tsconfig.json",
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "lint": "eslint src --ext .ts",
-    "migrate": "node dist/migrate.js"
+    "test": "npm run lint && npm run build"
   },
   "keywords": [
     "telegram",
@@ -31,12 +31,14 @@
     "telegraf": "^4.16.3"
   },
   "devDependencies": {
+    "@eslint/js": "^9.16.0",
     "@types/express": "^5.0.0",
     "@types/node": "^22.9.0",
     "@types/pg": "^8.11.10",
     "@typescript-eslint/eslint-plugin": "^8.14.0",
     "@typescript-eslint/parser": "^8.14.0",
     "eslint": "^9.14.0",
+    "globals": "^15.12.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.6.3"
   },
